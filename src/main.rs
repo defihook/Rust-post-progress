@@ -1,8 +1,7 @@
 use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::thread::sleep;
-use std::{fs, time};
+use std::{fs, thread, time};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -12,23 +11,22 @@ struct Opt {
     path: PathBuf,
 }
 
-fn find_fd_for_open_file(pid: u64, path: &PathBuf) -> Result<u32, Box<dyn Error>> {
-    // - Find file descriptor
-    // 	- ls fd
-    // 	- readlink on each, if it matches path, you got it
-    // 	- error if not
+fn find_fds_for_open_file(pid: u64, path: &PathBuf) -> Result<Vec<u32>, Box<dyn Error>> {
+    let mut fds = vec![];
     for dir_entry in fs::read_dir(format!("/proc/{}/fd/", pid))? {
         let dir_entry = dir_entry?;
         if &dir_entry.path().read_link()? == path {
-            return Ok(dir_entry
-                .file_name()
-                .into_string()
-                .unwrap()
-                .parse::<u32>()
-                .unwrap());
+            fds.push(
+                dir_entry
+                    .file_name()
+                    .into_string()
+                    .unwrap()
+                    .parse::<u32>()
+                    .unwrap(),
+            );
         }
     }
-    panic!(format!("Couldn't find fd pointing to: {:?}", path))
+    Ok(fds)
 }
 
 fn get_pos_from_fdinfo(contents: &str) -> u64 {
@@ -45,31 +43,38 @@ fn get_pos_from_fdinfo(contents: &str) -> u64 {
 fn main() -> Result<(), Box<dyn Error>> {
     let opt = Opt::from_args();
     let absolute_path = fs::canonicalize(&opt.path)?;
-    let fd = find_fd_for_open_file(opt.pid, &absolute_path)?;
+    let pid = opt.pid;
+    let fds = find_fds_for_open_file(pid, &absolute_path)?;
 
-    let file_size = fs::metadata(format!("/proc/{}/fd/{}", opt.pid, fd))?.len();
+    let m = indicatif::MultiProgress::new();
 
-    let pb = indicatif::ProgressBar::new(file_size);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .progress_chars("#>-"),
-    );
+    for fd in fds {
+        let file_size = fs::metadata(format!("/proc/{}/fd/{}", pid, fd))?.len();
+        let pb = m.add(indicatif::ProgressBar::new(file_size));
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+                .progress_chars("#>-"),
+        );
+        pb.set_message(&format!("/proc/{}/fd/{}", pid, fd));
+        let mut fdinfo = fs::File::open(format!("/proc/{}/fdinfo/{}", pid, fd))?;
+        thread::spawn(move || {
+            loop {
+                let mut contents = "".to_string();
+                fdinfo.read_to_string(&mut contents).unwrap();
+                fdinfo.seek(SeekFrom::Start(0)).unwrap();
 
-    let mut fdinfo = fs::File::open(format!("/proc/{}/fdinfo/{}", opt.pid, fd))?;
-    loop {
-        let mut contents = "".to_string();
-        fdinfo.read_to_string(&mut contents)?;
-        fdinfo.seek(SeekFrom::Start(0))?;
-
-        let pos = get_pos_from_fdinfo(&contents);
-        pb.set_position(pos);
-        if pos == file_size {
-            break;
-        }
-
-        sleep(time::Duration::from_millis(100));
+                let pos = get_pos_from_fdinfo(&contents);
+                pb.set_position(pos);
+                if pos == file_size {
+                    break;
+                }
+                thread::sleep(time::Duration::from_millis(100));
+            }
+            pb.finish_with_message("done");
+        });
     }
+    m.join_and_clear().unwrap();
 
     Ok(())
 }

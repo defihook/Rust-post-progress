@@ -8,14 +8,14 @@ use structopt::StructOpt;
 #[structopt(name = "ex-post-progress")]
 struct Opt {
     pid: u64,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
-fn find_fds_for_open_file(pid: u64, path: &PathBuf) -> Result<Vec<u32>, Box<dyn Error>> {
+fn find_fds_for_open_file(pid: u64, paths: &[PathBuf]) -> Result<Vec<u32>, Box<dyn Error>> {
     let mut fds = vec![];
     for dir_entry in fs::read_dir(format!("/proc/{}/fd/", pid))? {
         let dir_entry = dir_entry?;
-        if &dir_entry.path().read_link()? == path {
+        if paths.contains(&dir_entry.path().read_link()?) {
             fds.push(
                 dir_entry
                     .file_name()
@@ -42,9 +42,13 @@ fn get_pos_from_fdinfo(contents: &str) -> u64 {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opt = Opt::from_args();
-    let absolute_path = fs::canonicalize(&opt.path)?;
+    let absolute_paths = opt
+        .paths
+        .iter()
+        .map(|p| fs::canonicalize(p).unwrap())
+        .collect::<Vec<_>>();
     let pid = opt.pid;
-    let fds = find_fds_for_open_file(pid, &absolute_path)?;
+    let fds = find_fds_for_open_file(pid, &absolute_paths)?;
 
     let m = indicatif::MultiProgress::new();
 

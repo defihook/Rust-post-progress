@@ -11,19 +11,27 @@ struct Opt {
     paths: Vec<PathBuf>,
 }
 
-fn find_fds_for_open_file(pid: u64, paths: &[PathBuf]) -> Result<Vec<u32>, Box<dyn Error>> {
+fn find_fds_for_open_file(
+    pid: u64,
+    paths: &[PathBuf],
+) -> Result<Vec<(u32, PathBuf)>, Box<dyn Error>> {
     let mut fds = vec![];
     for dir_entry in fs::read_dir(format!("/proc/{}/fd/", pid))? {
         let dir_entry = dir_entry?;
-        if paths.contains(&dir_entry.path().read_link()?) {
-            fds.push(
+        let proc_fd_path = dir_entry.path();
+        let dest_path = proc_fd_path.read_link()?;
+        if paths.contains(&dest_path)
+            || (paths.is_empty() && proc_fd_path.metadata()?.file_type().is_file())
+        {
+            fds.push((
                 dir_entry
                     .file_name()
                     .into_string()
                     .unwrap()
                     .parse::<u32>()
                     .unwrap(),
-            );
+                dest_path,
+            ));
         }
     }
     Ok(fds)
@@ -52,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let m = indicatif::MultiProgress::new();
 
-    for fd in fds {
+    for (fd, path) in fds {
         let file_size = fs::metadata(format!("/proc/{}/fd/{}", pid, fd))?.len();
         let pb = m.add(indicatif::ProgressBar::new(file_size));
         pb.set_style(
@@ -60,7 +68,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
                 .progress_chars("#>-"),
         );
-        pb.set_message(&format!("/proc/{}/fd/{}", pid, fd));
+        pb.set_message(&format!(
+            "/proc/{}/fd/{} => {}",
+            pid,
+            fd,
+            path.to_string_lossy()
+        ));
         let mut fdinfo = fs::File::open(format!("/proc/{}/fdinfo/{}", pid, fd))?;
         thread::spawn(move || {
             loop {

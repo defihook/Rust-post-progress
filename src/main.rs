@@ -55,7 +55,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|p| fs::canonicalize(p).unwrap())
         .collect::<Vec<_>>();
-    let pid = opt.pid;
     let fds = find_fds_for_open_file(pid, &absolute_paths)?;
 
     let m = indicatif::MultiProgress::new();
